@@ -1,5 +1,5 @@
 cmake_minimum_required (VERSION 3.0)
-project(multi_dof_kinematic_calibration_project)
+project(multi_sensor_calibration_project)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules)
 
@@ -38,7 +38,7 @@ set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 endif(WIN32)
 
-add_subdirectory(multi_dof_kinematic_calibration)
+add_subdirectory(multi_sensor_calibration)
 add_subdirectory(visual_marker_mapping)
 
 configure_file(util/setup.sh setup.sh COPYONLY)
