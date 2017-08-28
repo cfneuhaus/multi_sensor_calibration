@@ -2,11 +2,11 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
-#include "multi_dof_kinematic_calibration/Calibrator.h"
+#include "multi_sensor_calibration/Calibrator.h"
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 
-using namespace multi_dof_kinematic_calibration;
+using namespace multi_sensor_calibration;
 
 //------------------------------------------------------------------------------------------------------------
 namespace po = boost::program_options;

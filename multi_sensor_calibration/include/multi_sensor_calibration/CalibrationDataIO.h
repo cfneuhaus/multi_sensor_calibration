@@ -1,5 +1,5 @@
-#ifndef MULTI_DOF_KINEMATIC_CALIBRATION_CALIBRATIONDATAIO_h
-#define MULTI_DOF_KINEMATIC_CALIBRATION_CALIBRATIONDATAIO_h
+#ifndef MULTI_SENSOR_CALIBRATION_CALIBRATIONDATAIO_h
+#define MULTI_SENSOR_CALIBRATION_CALIBRATIONDATAIO_h
 
 #include "visual_marker_mapping/CameraModel.h"
 #include "visual_marker_mapping/TagDetector.h"
@@ -10,7 +10,7 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
-namespace multi_dof_kinematic_calibration
+namespace multi_sensor_calibration
 {
 struct Scan3D
 {

@@ -1,4 +1,4 @@
-#include "multi_dof_kinematic_calibration/Calibrator.h"
+#include "multi_sensor_calibration/Calibrator.h"
 
 #include <Eigen/Geometry>
 
@@ -8,7 +8,7 @@
 #include "visual_marker_mapping/PropertyTreeUtilities.h"
 #include "visual_marker_mapping/ReconstructionIO.h"
 
-#include "multi_dof_kinematic_calibration/CeresUtil.h"
+#include "multi_sensor_calibration/CeresUtil.h"
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -18,7 +18,7 @@
 #include <ceres/rotation.h>
 #include <ceres/version.h>
 
-#include "multi_dof_kinematic_calibration/DebugVis.h"
+#include "multi_sensor_calibration/DebugVis.h"
 #include <fstream>
 #include <iostream>
 
@@ -47,7 +47,7 @@ void iterateMatches(const Map1& m1, const Map2& m2, F&& f)
     }
 }
 
-namespace multi_dof_kinematic_calibration
+namespace multi_sensor_calibration
 {
 struct TransformationChain
 {

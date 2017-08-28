@@ -1,4 +1,4 @@
-#include "multi_dof_kinematic_calibration/CalibrationDataIO.h"
+#include "multi_sensor_calibration/CalibrationDataIO.h"
 #include "visual_marker_mapping/DetectionIO.h"
 
 #include <Eigen/Core>
@@ -12,9 +12,9 @@
 
 namespace
 {
-multi_dof_kinematic_calibration::Scan3D loadScan(const std::string& filename)
+multi_sensor_calibration::Scan3D loadScan(const std::string& filename)
 {
-    multi_dof_kinematic_calibration::Scan3D ret;
+    multi_sensor_calibration::Scan3D ret;
     FILE* r = fopen((filename).c_str(), "rb");
     if (!r)
         throw std::runtime_error("Could not open " + filename);
@@ -60,7 +60,7 @@ multi_dof_kinematic_calibration::Scan3D loadScan(const std::string& filename)
     //	}
     return ret;
 }
-void addNoiseToScan(multi_dof_kinematic_calibration::Scan3D& scan, double std_dev)
+void addNoiseToScan(multi_sensor_calibration::Scan3D& scan, double std_dev)
 {
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -71,7 +71,7 @@ void addNoiseToScan(multi_dof_kinematic_calibration::Scan3D& scan, double std_de
 }
 
 
-namespace multi_dof_kinematic_calibration
+namespace multi_sensor_calibration
 {
 //----------------------------------------------------------------------------
 CalibrationData::CalibrationData(const std::string& filePath, double laser_noise_std_dev)

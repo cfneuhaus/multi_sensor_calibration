@@ -1,5 +1,5 @@
-#ifndef MULTI_DOF_KINEMATIC_CALIBRATION_CALIBRATOR_H
-#define MULTI_DOF_KINEMATIC_CALIBRATION_CALIBRATOR_H
+#ifndef MULTI_SENSOR_CALIBRATION_CALIBRATOR_H
+#define MULTI_SENSOR_CALIBRATION_CALIBRATOR_H
 
 #include "visual_marker_mapping/Camera.h"
 #include "visual_marker_mapping/TagReconstructor.h"
@@ -11,7 +11,7 @@
 #include <string>
 #include <map>
 
-namespace multi_dof_kinematic_calibration
+namespace multi_sensor_calibration
 {
 struct Calibrator
 {
