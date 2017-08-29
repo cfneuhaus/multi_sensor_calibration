@@ -27,7 +27,7 @@ struct Calibrator
         ONLY_FULL
     };
 
-    void optimizeUpToJoint(const std::set<size_t>& optimization_set, OptimizationMode mode);
+    void optimizeUpToJoint(OptimizationMode optimizationMode);
 
     CalibrationData calib_data;
 
@@ -46,9 +46,6 @@ struct Calibrator
     struct JointData
     {
         Eigen::Matrix<double, 7, 1>  parent_to_joint_pose;
-
-        // std::vector<double> joint_positions;
-        double ticks_to_rad;
     };
 
     std::vector<JointData> jointData;

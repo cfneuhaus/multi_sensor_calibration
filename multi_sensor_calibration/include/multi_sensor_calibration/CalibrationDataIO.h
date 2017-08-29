@@ -21,8 +21,6 @@ struct JointInfo
 {
     std::string name;
     std::string type;
-    double ticks_to_rad; // ticks * ticks_to_rad = rad
-    double angular_noise_std_dev;
 
     std::string parent;
 

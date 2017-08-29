@@ -101,15 +101,8 @@ CalibrationData::CalibrationData(const std::string& filePath, double laser_noise
         JointInfo inf;
         inf.name = jointNode.second.get<std::string>("name");
         inf.type = jointNode.second.get<std::string>("type");
-        if (inf.type == "1_dof_joint")
+        if (inf.type == "pose")
         {
-            inf.ticks_to_rad = jointNode.second.get<double>("ticks_to_rad");
-            inf.angular_noise_std_dev = jointNode.second.get<double>("angular_noise_std_dev");
-        }
-        else if (inf.type == "pose")
-        {
-            inf.ticks_to_rad = 0;
-            inf.angular_noise_std_dev = 0;
         }
         else
             throw std::runtime_error("Unknown joint type: " + inf.type);
@@ -274,15 +267,7 @@ CalibrationData::CalibrationData(const std::string& filePath, double laser_noise
 
         for (size_t j = 0; j < joints.size(); j++)
         {
-            if (joints[j].type == "1_dof_joint")
-            {
-                char buffer[256];
-                sprintf(buffer, "%s_ticks", joints[j].name.c_str());
-                const int ticks = calib_frame_node.second.get<int>(buffer);
-                calib_frame.joint_config.push_back(ticks);
-            }
-            else
-                calib_frame.joint_config.push_back(0);
+            calib_frame.joint_config.push_back(0);
         }
 
 //		if (ptuInfo.camera_id==0)
