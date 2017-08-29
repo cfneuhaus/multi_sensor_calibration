@@ -460,8 +460,6 @@ void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
                     = chain.endEffectorPose(&parameter_blocks[0]);
                 const auto laser_to_world = cposeInv<double>(world_to_laser);
 
-                std::cout << "LA2WORLD" << laser_to_world.transpose() << std::endl;
-
                 int corresp = 0;
                 for (int p = 0; p < cur_scan->points.cols(); p++)
                 {
