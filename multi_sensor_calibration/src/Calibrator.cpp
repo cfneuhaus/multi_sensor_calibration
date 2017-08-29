@@ -252,31 +252,230 @@ Calibrator::Calibrator(CalibrationData calib_data)
     : calib_data(std::move(calib_data))
 {
 }
+void Calibrator::addSimpleSensorResiduals(
+    SensorCalibrationProblem& problem, int calib_frame_id, int sensor_id, bool simple)
+{
+    const std::string& sensor_type = calib_data.sensor_id_to_type[sensor_id];
+
+    TransformationChain chain;
+    std::vector<double*> parameter_blocks;
+
+    if (calib_data.calib_frames[calib_frame_id].location_id != -1)
+    {
+        auto& location
+            = location_id_to_location[calib_data.calib_frames[calib_frame_id].location_id];
+        chain.addPose();
+
+        parameter_blocks.push_back(&location(0));
+        parameter_blocks.push_back(&location(3));
+    }
+
+    const auto path_to_sensor
+        = pathFromRootToJoint(calib_data.sensor_id_to_parent_joint[sensor_id]);
+
+    constexpr bool robustify = true;
+
+    for (size_t pj = 0; pj < path_to_sensor.size(); pj++)
+    {
+        const size_t j = path_to_sensor[pj];
+
+        if (calib_data.joints[j].type == "pose")
+        {
+            chain.addPose();
+
+            parameter_blocks.push_back(&jointData[j].parent_to_joint_pose(0));
+            parameter_blocks.push_back(&jointData[j].parent_to_joint_pose(3));
+        }
+    }
+
+    if (sensor_type == "camera")
+    {
+        // sensor is a cam
+        const int camera_id = sensor_id;
+        const auto& cam_model = calib_data.cameraModelById[camera_id];
+
+        if (simple)
+            if (reconstructedPoses.count(std::make_pair(calib_frame_id, camera_id)))
+            {
+                const Eigen::Matrix<double, 7, 1> world_to_cam
+                    = reconstructedPoses[std::make_pair(calib_frame_id, camera_id)];
+
+                // location_id_to_location[calib_data.calib_frames[i].location_id] =
+                // world_to_cam;
+                // //////// hack
+
+                auto simpleCostFn = KinematicChainPoseError::Create(world_to_cam, chain);
+                problem.optim_problem.AddResidualBlock(simpleCostFn,
+                    robustify ? new ceres::HuberLoss(1.0) : nullptr, // new ceres::CauchyLoss(3),
+                    parameter_blocks);
+            }
+
+        if (simple)
+            return;
+
+
+        // const auto& cam_model = id_to_cam_model.second;
+        const auto& camera_observations
+            = calib_data.calib_frames[calib_frame_id].cam_id_to_observations[camera_id];
+        const auto& world_points = calib_data.reconstructed_map_points;
+        iterateMatches(camera_observations, world_points,
+            [&](int /*point_id*/, const Eigen::Vector2d& cp, const Eigen::Vector3d& wp) {
+                // check origin pose
+                // {
+                //     OpenCVReprojectionError repErr(tagObs.corners[c],
+                //     camModel.distortionCoefficients,camModel.getK());
+                //     repErr.print=true;
+                //     double res[2];
+                //     repErr(&world_to_cam(0), &world_to_cam(3), &tagCorners[c](0),
+                //     res);
+                //     std::cout << "ERR: " << sqrt(res[0]*res[0]+res[1]*res[1]) <<
+                //     std::endl;
+                // }
+
+
+                auto fullCostFn = KinematicChainRepError::Create(
+                    cp, wp, cam_model.distortionCoefficients, cam_model.getK(), chain);
+                problem.optim_problem.AddResidualBlock(fullCostFn,
+                    robustify ? new ceres::HuberLoss(1.0) : nullptr, // new ceres::CauchyLoss(3),
+                    parameter_blocks);
+
+                problem.repErrorFns.push_back([parameter_blocks, fullCostFn]() -> double {
+                    Eigen::Vector2d err;
+                    fullCostFn->Evaluate(&parameter_blocks[0], &err(0), nullptr);
+                    return err.squaredNorm();
+                });
+                problem.repErrorFnsByCam[camera_id].push_back(
+                    [parameter_blocks, fullCostFn]() -> double {
+                        Eigen::Vector2d err;
+                        fullCostFn->Evaluate(&parameter_blocks[0], &err(0), nullptr);
+                        return err.squaredNorm();
+                    });
+            });
+    }
+    else if (sensor_type == "laser_3d")
+    {
+        if (simple)
+            return;
+        const auto& cur_scan
+            = calib_data.calib_frames[calib_frame_id].sensor_id_to_laser_scan_3d[sensor_id];
+
+        const Eigen::Matrix<double, 7, 1> world_to_laser
+            = chain.endEffectorPose(&parameter_blocks[0]);
+        const auto laser_to_world = cposeInv<double>(world_to_laser);
+
+        int corresp = 0;
+        for (int p = 0; p < cur_scan->points.cols(); p++)
+        {
+            const Eigen::Vector3d pt = cur_scan->points.col(p);
+            const Eigen::Vector3d ptw = cposeTransformPoint<double>(laser_to_world, pt);
+
+            const visual_marker_mapping::ReconstructedTag* min_tag = nullptr;
+            double min_sqr_dist = 9999999999.0;
+            for (const auto& id_to_rec_tag : calib_data.reconstructed_tags)
+            {
+                const visual_marker_mapping::ReconstructedTag& tag = id_to_rec_tag.second;
+#if 0
+                Eigen::Matrix<double, 7, 1> marker_to_world;
+                marker_to_world.segment<3>(0) = tag.t;
+                marker_to_world.segment<4>(3) = tag.q;
+                auto world_to_marker = cposeInv<double>(marker_to_world);
+                auto mpt = cposeTransformPoint<double>(world_to_marker, ptw);
+
+                if ((mpt.x() < -0.12) || (mpt.y() < -0.12) || (mpt.x() > 0.12)
+                    || (mpt.y() > 0.12))
+                    continue;
+
+                if (mpt.z() < -0.2)
+                    continue;
+                if (mpt.z() > 0.2)
+                    continue;
+
+                const double dist = mpt.z();
+#else
+                const double sqr_dist = (tag.t - ptw).squaredNorm();
+                const double marker_radius
+                    = std::max(tag.tagWidth, tag.tagHeight) / 2.0 * sqrt(2.0);
+#endif
+                if ((sqr_dist < min_sqr_dist) && (sqr_dist < marker_radius * marker_radius))
+                {
+                    min_tag = &tag;
+                    min_sqr_dist = sqr_dist;
+                }
+            }
+            if (!min_tag)
+                continue;
+
+            // dbgout.addPoint(ptw);
+
+            Eigen::Matrix<double, 7, 1> marker_to_world;
+            marker_to_world.segment<3>(0) = min_tag->t;
+            marker_to_world.segment<4>(3) = min_tag->q;
+
+#if 1
+            auto fullCostFn = MarkerPoint2PlaneError::Create(marker_to_world, pt, chain);
+            problem.optim_problem.AddResidualBlock(
+                fullCostFn, robustify ? new ceres::HuberLoss(1.0) : nullptr, parameter_blocks);
+#endif
+
+
+            //			{
+            //            Eigen::Vector3d err;
+            //            double* parameter_blocks[4] = { &world_to_cam_poses[i](0),
+            //            &world_to_cam_poses[i](3) ,&cam_to_laser_pose(0),
+            //											&cam_to_laser_pose(3)};
+            //            fullCostFn->Evaluate(&parameter_blocks[0], &err(0), nullptr);
+            //            std::cout << "err: " << err.transpose() << std::endl;;
+            //			}
+
+            corresp++;
+            problem.total_laser_correspondences++;
+        }
+        // std::cout << "Corresp : "<< corresp << std::endl;
+    }
+}
+//-----------------------------------------------------------------------------
+std::vector<std::size_t> Calibrator::pathFromRootToJoint(const std::string& start)
+{
+    std::string cur_joint_name = start;
+    std::vector<size_t> joint_list;
+    if (cur_joint_name == "base")
+        return joint_list;
+    size_t cur_index = calib_data.name_to_joint[cur_joint_name];
+    joint_list.push_back(cur_index);
+    while (1)
+    {
+        cur_joint_name = calib_data.joints[cur_index].parent;
+        if (cur_joint_name == "base")
+            break;
+        cur_index = calib_data.name_to_joint[cur_joint_name];
+        joint_list.push_back(cur_index);
+    }
+    std::reverse(joint_list.begin(), joint_list.end());
+    return joint_list;
+}
+//-----------------------------------------------------------------------------
+void Calibrator::addJointParameterBlocks(SensorCalibrationProblem& problem, int joint_id)
+{
+    auto& parent_to_joint_pose = jointData[joint_id].parent_to_joint_pose;
+
+    if (calib_data.joints[joint_id].type == "pose")
+    {
+        problem.optim_problem.AddParameterBlock(&parent_to_joint_pose(0), 3);
+        problem.optim_problem.AddParameterBlock(
+            &parent_to_joint_pose(3), 4, new ceres::QuaternionParameterization);
+
+        if (calib_data.joints[joint_id].fixed)
+        {
+            problem.optim_problem.SetParameterBlockConstant(&parent_to_joint_pose(0));
+            problem.optim_problem.SetParameterBlockConstant(&parent_to_joint_pose(3));
+        }
+    }
+}
 //-----------------------------------------------------------------------------
 void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
 {
-    auto pathFromRootToJoint = [this](const std::string& start) -> std::vector<size_t> {
-        std::string cur_joint_name = start;
-        std::vector<size_t> joint_list;
-        if (cur_joint_name == "base")
-            return joint_list;
-        size_t cur_index = calib_data.name_to_joint[cur_joint_name];
-        joint_list.push_back(cur_index);
-        while (1)
-        {
-            cur_joint_name = calib_data.joints[cur_index].parent;
-            if (cur_joint_name == "base")
-                break;
-            cur_index = calib_data.name_to_joint[cur_joint_name];
-            joint_list.push_back(cur_index);
-        }
-        std::reverse(joint_list.begin(), joint_list.end());
-        return joint_list;
-    };
-
-
-    ceres::Problem problem_simple;
-    ceres::Problem problem_full;
+    SensorCalibrationProblem problem_simple;
+    SensorCalibrationProblem problem_full;
 
     const std::vector<int> yzconstant_params = { 1, 2 };
     //    const auto yzconstant_parametrization = new ceres::SubsetParameterization(3,
@@ -289,27 +488,8 @@ void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
 
     for (size_t j = 0; j < jointData.size(); j++)
     {
-        auto& parent_to_joint_pose = jointData[j].parent_to_joint_pose;
-
-        if (calib_data.joints[j].type == "pose")
-        {
-            std::cout << "add param: " << calib_data.joints[j].name << std::endl;
-            problem_full.AddParameterBlock(&parent_to_joint_pose(0), 3);
-            problem_full.AddParameterBlock(
-                &parent_to_joint_pose(3), 4, quaternion_parameterization2);
-            problem_simple.AddParameterBlock(&parent_to_joint_pose(0), 3);
-            problem_simple.AddParameterBlock(
-                &parent_to_joint_pose(3), 4, quaternion_parameterization);
-
-
-            if (calib_data.joints[j].fixed)
-            {
-                problem_full.SetParameterBlockConstant(&parent_to_joint_pose(0));
-                problem_full.SetParameterBlockConstant(&parent_to_joint_pose(3));
-                problem_simple.SetParameterBlockConstant(&parent_to_joint_pose(0));
-                problem_simple.SetParameterBlockConstant(&parent_to_joint_pose(3));
-            }
-        }
+        addJointParameterBlocks(problem_simple, j);
+        addJointParameterBlocks(problem_full, j);
     }
 
     std::set<int> initialized_locations;
@@ -321,20 +501,22 @@ void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
         if (!initialized_locations.count(calib_data.calib_frames[i].location_id))
         {
             auto& location = location_id_to_location[calib_data.calib_frames[i].location_id];
-            problem_full.AddParameterBlock(&location(0), 3);
-            problem_full.AddParameterBlock(&location(3), 4, quaternion_parameterization2);
-            problem_simple.AddParameterBlock(&location(0), 3);
-            problem_simple.AddParameterBlock(&location(3), 4, quaternion_parameterization);
+            problem_full.optim_problem.AddParameterBlock(&location(0), 3);
+            problem_full.optim_problem.AddParameterBlock(
+                &location(3), 4, quaternion_parameterization2);
+            problem_simple.optim_problem.AddParameterBlock(&location(0), 3);
+            problem_simple.optim_problem.AddParameterBlock(
+                &location(3), 4, quaternion_parameterization);
 
             if (calib_data.optional_location_infos.count(calib_data.calib_frames[i].location_id))
             {
                 if (calib_data.optional_location_infos[calib_data.calib_frames[i].location_id]
                         .fixed)
                 {
-                    problem_full.SetParameterBlockConstant(&location(0));
-                    problem_full.SetParameterBlockConstant(&location(3));
-                    problem_simple.SetParameterBlockConstant(&location(0));
-                    problem_simple.SetParameterBlockConstant(&location(3));
+                    problem_full.optim_problem.SetParameterBlockConstant(&location(0));
+                    problem_full.optim_problem.SetParameterBlockConstant(&location(3));
+                    problem_simple.optim_problem.SetParameterBlockConstant(&location(0));
+                    problem_simple.optim_problem.SetParameterBlockConstant(&location(3));
                 }
             }
 
@@ -342,8 +524,8 @@ void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
         }
     }
 
-    std::vector<std::function<double()> > repErrorFns;
-    std::map<int, std::vector<std::function<double()> > > repErrorFnsByCam;
+    // std::vector<std::function<double()> > repErrorFns;
+    // std::map<int, std::vector<std::function<double()> > > repErrorFnsByCam;
 
 
     std::cout << "Building optimization problems..." << std::endl;
@@ -355,225 +537,15 @@ void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
     {
         for (const auto& sensor_id_to_type : calib_data.sensor_id_to_type)
         {
-            const int sensor_id = sensor_id_to_type.first;
-            const std::string& sensor_type = sensor_id_to_type.second;
-
-            TransformationChain chain;
-            std::vector<double*> parameter_blocks;
-
-            if (calib_data.calib_frames[i].location_id != -1)
-            {
-                auto& location = location_id_to_location[calib_data.calib_frames[i].location_id];
-                chain.addPose();
-
-                parameter_blocks.push_back(&location(0));
-                parameter_blocks.push_back(&location(3));
-            }
-
-            const auto path_to_sensor
-                = pathFromRootToJoint(calib_data.sensor_id_to_parent_joint[sensor_id]);
-
-            constexpr bool robustify = true;
-
-            for (size_t pj = 0; pj < path_to_sensor.size(); pj++)
-            {
-                const size_t j = path_to_sensor[pj];
-
-                if (calib_data.joints[j].type == "pose")
-                {
-                    chain.addPose();
-
-                    parameter_blocks.push_back(&jointData[j].parent_to_joint_pose(0));
-                    parameter_blocks.push_back(&jointData[j].parent_to_joint_pose(3));
-                }
-            }
-
-            if (sensor_type == "camera")
-            {
-                // sensor is a cam
-                const int camera_id = sensor_id;
-                const auto& cam_model = calib_data.cameraModelById[camera_id];
-
-                if (reconstructedPoses.count(std::make_pair(i, camera_id)))
-                {
-                    const Eigen::Matrix<double, 7, 1> world_to_cam
-                        = reconstructedPoses[std::make_pair(i, camera_id)];
-
-                    // location_id_to_location[calib_data.calib_frames[i].location_id] =
-                    // world_to_cam;
-                    // //////// hack
-
-                    auto simpleCostFn = KinematicChainPoseError::Create(world_to_cam, chain);
-                    problem_simple.AddResidualBlock(simpleCostFn,
-                        robustify ? new ceres::HuberLoss(1.0)
-                                  : nullptr, // new ceres::CauchyLoss(3),
-                        parameter_blocks);
-                }
-
-
-                // const auto& cam_model = id_to_cam_model.second;
-                const auto& camera_observations
-                    = calib_data.calib_frames[i].cam_id_to_observations[camera_id];
-                const auto& world_points = calib_data.reconstructed_map_points;
-                iterateMatches(camera_observations, world_points,
-                    [&](int /*point_id*/, const Eigen::Vector2d& cp, const Eigen::Vector3d& wp) {
-                        // check origin pose
-                        // {
-                        //     OpenCVReprojectionError repErr(tagObs.corners[c],
-                        //     camModel.distortionCoefficients,camModel.getK());
-                        //     repErr.print=true;
-                        //     double res[2];
-                        //     repErr(&world_to_cam(0), &world_to_cam(3), &tagCorners[c](0), res);
-                        //     std::cout << "ERR: " << sqrt(res[0]*res[0]+res[1]*res[1]) <<
-                        //     std::endl;
-                        // }
-
-
-                        auto fullCostFn = KinematicChainRepError::Create(
-                            cp, wp, cam_model.distortionCoefficients, cam_model.getK(), chain);
-                        problem_full.AddResidualBlock(fullCostFn,
-                            robustify ? new ceres::HuberLoss(1.0)
-                                      : nullptr, // new ceres::CauchyLoss(3),
-                            parameter_blocks);
-
-                        repErrorFns.push_back([parameter_blocks, fullCostFn]() -> double {
-                            Eigen::Vector2d err;
-                            fullCostFn->Evaluate(&parameter_blocks[0], &err(0), nullptr);
-                            return err.squaredNorm();
-                        });
-                        repErrorFnsByCam[camera_id].push_back(
-                            [parameter_blocks, fullCostFn]() -> double {
-                                Eigen::Vector2d err;
-                                fullCostFn->Evaluate(&parameter_blocks[0], &err(0), nullptr);
-                                return err.squaredNorm();
-                            });
-                    });
-            }
-            else if (sensor_type == "laser_3d")
-            {
-                if (optimizationMode == OptimizationMode::ONLY_SIMPLE)
-                    continue;
-                const auto& cur_scan
-                    = calib_data.calib_frames[i].sensor_id_to_laser_scan_3d[sensor_id];
-
-                const Eigen::Matrix<double, 7, 1> world_to_laser
-                    = chain.endEffectorPose(&parameter_blocks[0]);
-                const auto laser_to_world = cposeInv<double>(world_to_laser);
-
-                int corresp = 0;
-                for (int p = 0; p < cur_scan->points.cols(); p++)
-                {
-                    const Eigen::Vector3d pt = cur_scan->points.col(p);
-                    const Eigen::Vector3d ptw = cposeTransformPoint<double>(laser_to_world, pt);
-
-                    const visual_marker_mapping::ReconstructedTag* min_tag = nullptr;
-                    double min_sqr_dist = 9999999999.0;
-                    for (const auto& id_to_rec_tag : calib_data.reconstructed_tags)
-                    {
-                        const visual_marker_mapping::ReconstructedTag& tag = id_to_rec_tag.second;
-#if 0
-	                    Eigen::Matrix<double, 7, 1> marker_to_world;
-	                    marker_to_world.segment<3>(0) = tag.t;
-	                    marker_to_world.segment<4>(3) = tag.q;
-	                    auto world_to_marker = cposeInv<double>(marker_to_world);
-	                    auto mpt = cposeTransformPoint<double>(world_to_marker, ptw);
-	
-	                    if ((mpt.x() < -0.12) || (mpt.y() < -0.12) || (mpt.x() > 0.12)
-	                        || (mpt.y() > 0.12))
-	                        continue;
-	
-	                    if (mpt.z() < -0.2)
-	                        continue;
-	                    if (mpt.z() > 0.2)
-	                        continue;
-	
-	                    const double dist = mpt.z();
-#else
-                        const double sqr_dist = (tag.t - ptw).squaredNorm();
-                        const double marker_radius
-                            = std::max(tag.tagWidth, tag.tagHeight) / 2.0 * sqrt(2.0);
-#endif
-                        if ((sqr_dist < min_sqr_dist) && (sqr_dist < marker_radius * marker_radius))
-                        {
-                            min_tag = &tag;
-                            min_sqr_dist = sqr_dist;
-                        }
-                    }
-                    if (!min_tag)
-                        continue;
-
-                    // dbgout.addPoint(ptw);
-
-                    Eigen::Matrix<double, 7, 1> marker_to_world;
-                    marker_to_world.segment<3>(0) = min_tag->t;
-                    marker_to_world.segment<4>(3) = min_tag->q;
-
-#if 1
-                    auto fullCostFn = MarkerPoint2PlaneError::Create(marker_to_world, pt, chain);
-                    problem_full.AddResidualBlock(fullCostFn,
-                        robustify ? new ceres::HuberLoss(1.0) : nullptr, parameter_blocks);
-#endif
-
-
-                    //			{
-                    //            Eigen::Vector3d err;
-                    //            double* parameter_blocks[4] = { &world_to_cam_poses[i](0),
-                    //            &world_to_cam_poses[i](3) ,&cam_to_laser_pose(0),
-                    //											&cam_to_laser_pose(3)};
-                    //            fullCostFn->Evaluate(&parameter_blocks[0], &err(0), nullptr);
-                    //            std::cout << "err: " << err.transpose() << std::endl;;
-                    //			}
-
-                    corresp++;
-                    total_laser_correspondences++;
-                }
-                // std::cout << "Corresp : "<< corresp << std::endl;
-            }
+            if (optimizationMode == OptimizationMode::ONLY_SIMPLE)
+                addSimpleSensorResiduals(problem_simple, i, sensor_id_to_type.first, true);
+            else
+                addSimpleSensorResiduals(problem_full, i, sensor_id_to_type.first, false);
         }
     }
     std::cout << "Building optimization problems...done!" << std::endl;
     std::cout << "Laser correspondence count: " << total_laser_correspondences << std::endl;
 
-    auto computeRMSE = [&repErrorFns]() -> double {
-        if (repErrorFns.empty())
-            return 0.0;
-
-        double rms = 0;
-        for (const auto& errFn : repErrorFns)
-        {
-            const double sqrError = errFn();
-            // if (sqrt(sqrError)>2)
-            // std::cout << "RepError: " << sqrt(sqrError) << std::endl;
-            rms += sqrError;
-        }
-        return sqrt(rms / repErrorFns.size());
-    };
-    auto computeMedianError = [&repErrorFns]() -> double {
-        if (repErrorFns.empty())
-            return 0.0;
-
-        std::vector<double> errors;
-        for (const auto& errFn : repErrorFns)
-        {
-            const double sqrError = errFn();
-            errors.push_back(sqrError);
-        }
-        std::sort(errors.begin(), errors.end());
-        return sqrt(errors[errors.size() / 2]);
-    };
-    auto computeRMSEByCam = [&repErrorFnsByCam](int cam) -> double {
-        if (repErrorFnsByCam[cam].empty())
-            return 0.0;
-
-        double rms = 0;
-        for (const auto& errFn : repErrorFnsByCam[cam])
-        {
-            const double sqrError = errFn();
-            // std::cout << "RepError: " << sqrt(sqrError) << std::endl;
-            rms += sqrError;
-        }
-        return sqrt(rms / repErrorFnsByCam[cam].size());
-    };
 
     ceres::Solver::Options options;
     options.minimizer_progress_to_stdout = false;
@@ -586,7 +558,7 @@ void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
     {
         std::cout << "Solving simple optimization problem..." << std::endl;
         ceres::Solver::Summary summary;
-        ceres::Solve(options, &problem_simple, &summary);
+        ceres::Solve(options, &problem_simple.optim_problem, &summary);
     }
     if (optimizationMode == OptimizationMode::ONLY_SIMPLE)
     {
@@ -595,14 +567,14 @@ void Calibrator::optimizeUpToJoint(OptimizationMode optimizationMode)
     {
         std::cout << "Solving full optimization problem..." << std::endl;
         ceres::Solver::Summary summary2;
-        ceres::Solve(options, &problem_full, &summary2);
+        ceres::Solve(options, &problem_full.optim_problem, &summary2);
         std::cout << "    Full optimization returned termination type " << summary2.termination_type
                   << std::endl;
         // std::cout << summary2.FullReport() << std::endl;
     }
 
-    std::cout << "    Full training reprojection error RMS: " << computeRMSE() << " px"
-              << " Median: " << computeMedianError() << " px" << std::endl;
+    std::cout << "    Full training reprojection error RMS: " << problem_full.computeRMSE() << " px"
+              << " Median: " << problem_full.computeMedianError() << " px" << std::endl;
     std::cout << "Solving full optimization problem...done!" << std::endl;
 
     std::cout << std::endl;
@@ -672,9 +644,10 @@ void Calibrator::exportCalibrationResults(const std::string& filePath) const
 //-----------------------------------------------------------------------------
 void Calibrator::calibrate(const std::string& visualization_filename)
 {
-    for (size_t i = 0; i < calib_data.calib_frames.size(); i++)
+    for (size_t calib_frame_id = 0; calib_frame_id < calib_data.calib_frames.size();
+         calib_frame_id++)
     {
-        const int location_id = calib_data.calib_frames[i].location_id;
+        const int location_id = calib_data.calib_frames[calib_frame_id].location_id;
         if (location_id != -1)
         {
             if (!calib_data.optional_location_infos.count(location_id))
@@ -689,15 +662,15 @@ void Calibrator::calibrate(const std::string& visualization_filename)
             }
         }
 
-        for (const auto& id_to_cam_model : calib_data.cameraModelById)
+        for (const auto& cam_id_to_cam_model : calib_data.cameraModelById)
         {
-            const size_t camera_id = id_to_cam_model.first;
-            const auto& cam_model = id_to_cam_model.second;
+            const size_t camera_id = cam_id_to_cam_model.first;
+            const auto& cam_model = cam_id_to_cam_model.second;
 
             Eigen::Quaterniond q;
             Eigen::Vector3d t;
-            bool success = computeRelativeCameraPoseFromImg(
-                camera_id, i, cam_model.getK(), cam_model.distortionCoefficients, q, t);
+            bool success = computeRelativeCameraPoseFromImg(camera_id, calib_frame_id,
+                cam_model.getK(), cam_model.distortionCoefficients, q, t);
             if (!success)
             {
                 std::cerr << "Initialization failed" << std::endl;
@@ -712,7 +685,7 @@ void Calibrator::calibrate(const std::string& visualization_filename)
                 //      if (ptuData.ptuImagePoses[i].cameraId==0)
                 //        debugVis.push_back(dbg);
 
-                reconstructedPoses[std::make_pair(i, camera_id)] = cam_pose;
+                reconstructedPoses[std::make_pair(calib_frame_id, camera_id)] = cam_pose;
             }
         }
     }
@@ -743,7 +716,7 @@ void Calibrator::calibrate(const std::string& visualization_filename)
     // correspondences can improve
     if (!calib_data.laser_sensor_ids.empty())
     {
-        for (int its = 0; its < 2; its++)
+        for (int its = 0; its < 5; its++)
         {
             optimizeUpToJoint(OptimizationMode::ONLY_FULL);
             std::cout << "-------------------------------------------------------------------------"

@@ -1,18 +1,73 @@
 #ifndef MULTI_SENSOR_CALIBRATION_CALIBRATOR_H
 #define MULTI_SENSOR_CALIBRATION_CALIBRATOR_H
 
-#include "visual_marker_mapping/Camera.h"
-#include "visual_marker_mapping/TagReconstructor.h"
-#include "visual_marker_mapping/TagDetector.h"
 #include "CalibrationDataIO.h"
+#include "visual_marker_mapping/Camera.h"
+#include "visual_marker_mapping/TagDetector.h"
+#include "visual_marker_mapping/TagReconstructor.h"
 #include <Eigen/Core>
-#include <set>
-#include <vector>
-#include <string>
+#include <ceres/ceres.h>
 #include <map>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace multi_sensor_calibration
 {
+struct SensorCalibrationProblem
+{
+
+    ceres::Problem optim_problem;
+
+    int total_laser_correspondences;
+
+    std::vector<std::function<double()> > repErrorFns;
+    std::map<int, std::vector<std::function<double()> > > repErrorFnsByCam;
+
+    double computeRMSE() const
+    {
+        if (repErrorFns.empty())
+            return 0.0;
+
+        double rms = 0;
+        for (const auto& errFn : repErrorFns)
+        {
+            const double sqrError = errFn();
+            // if (sqrt(sqrError)>2)
+            // std::cout << "RepError: " << sqrt(sqrError) << std::endl;
+            rms += sqrError;
+        }
+        return sqrt(rms / repErrorFns.size());
+    }
+    double computeMedianError() const
+    {
+        if (repErrorFns.empty())
+            return 0.0;
+
+        std::vector<double> errors;
+        for (const auto& errFn : repErrorFns)
+        {
+            const double sqrError = errFn();
+            errors.push_back(sqrError);
+        }
+        std::sort(errors.begin(), errors.end());
+        return sqrt(errors[errors.size() / 2]);
+    }
+    double computeRMSEByCam(int cam)
+    {
+        if (repErrorFnsByCam[cam].empty())
+            return 0.0;
+
+        double rms = 0;
+        for (const auto& errFn : repErrorFnsByCam[cam])
+        {
+            const double sqrError = errFn();
+            // std::cout << "RepError: " << sqrt(sqrError) << std::endl;
+            rms += sqrError;
+        }
+        return sqrt(rms / repErrorFnsByCam[cam].size());
+    }
+};
 struct Calibrator
 {
     Calibrator(CalibrationData calib_data);
@@ -37,6 +92,9 @@ struct Calibrator
 
     void exportCalibrationResults(const std::string& filePath) const;
 
+    void addSimpleSensorResiduals(
+        SensorCalibrationProblem& problem, int calib_frame_id, int sensor_id, bool simple);
+
 
     /////////
 
@@ -45,13 +103,18 @@ struct Calibrator
 
     struct JointData
     {
-        Eigen::Matrix<double, 7, 1>  parent_to_joint_pose;
+        Eigen::Matrix<double, 7, 1> parent_to_joint_pose;
     };
 
     std::vector<JointData> jointData;
 
+    void addJointParameterBlocks(SensorCalibrationProblem& problem, int joint_id);
+
 
     std::map<int, Eigen::Matrix<double, 7, 1> > location_id_to_location;
+
+private:
+    std::vector<std::size_t> pathFromRootToJoint(const std::string& start);
 };
 }
 
